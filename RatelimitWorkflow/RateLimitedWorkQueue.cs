@@ -21,6 +21,10 @@ namespace RatelimitWorkflow
 
         private volatile bool _isDisposed;
         private volatile bool _isDisposing;
+        
+        // Track in-flight executing tasks so disposal can wait for them to finish
+        private int _inFlightCount;
+        private TaskCompletionSource<bool> _inFlightTcs = CreateCompletedTcs();
 
         /// <summary>
         /// Creates a new rate-limited work queue.
@@ -64,61 +68,49 @@ namespace RatelimitWorkflow
             return workItem.TaskCompletionSource.Task;
         }
 
+        private static TaskCompletionSource<bool> CreateCompletedTcs()
+        {
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            tcs.TrySetResult(true);
+            return tcs;
+        }
+
+        private void OnWorkItemStarted()
+        {
+            if (Interlocked.Increment(ref _inFlightCount) == 1)
+            {
+                // reset the TCS to wait for completion
+                _inFlightTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+        }
+
+        private void OnWorkItemCompleted()
+        {
+            if (Interlocked.Decrement(ref _inFlightCount) == 0)
+            {
+                _inFlightTcs.TrySetResult(true);
+            }
+        }
+
         private async Task DispatcherLoop()
         {
             try
             {
-                while (true)
+                while (!_shutdownTokenSource.Token.IsCancellationRequested)
                 {
-                    // Check if we should continue processing
-                    bool isShuttingDown = _shutdownTokenSource.Token.IsCancellationRequested;
-
-                    // Wait for work to be available (with a timeout during shutdown to poll queue)
-                    try
-                    {
-                        if (isShuttingDown)
-                        {
-                            // During shutdown, use a short timeout to poll the queue
-                            await _workAvailableSignal.WaitAsync(TimeSpan.FromMilliseconds(100));
-                        }
-                        else
-                        {
-                            await _workAvailableSignal.WaitAsync(_shutdownTokenSource.Token);
-                        }
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // During shutdown, this is expected. Set the flag and continue processing
-                        isShuttingDown = true;
-                    }
+                    // Wait for work to be available
+                    await _workAvailableSignal.WaitAsync(_shutdownTokenSource.Token);
 
                     // Try to dequeue work
                     if (!_queue.TryDequeue(out var workItem))
-                    {
-                        // No work available
-                        if (isShuttingDown)
-                        {
-                            // Exit the loop if we're shutting down and queue is empty
-                            break;
-                        }
                         continue;
-                    }
 
                     // Check if item was already cancelled
                     if (workItem.IsAlreadyCancelled)
                         continue;
 
                     // Enforce rate limit
-                    try
-                    {
-                        await WaitForRateLimitSlot(isShuttingDown ? CancellationToken.None : _shutdownTokenSource.Token);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // During shutdown, if rate limit wait is cancelled, mark as shutting down and try again
-                        isShuttingDown = true;
-                        continue;
-                    }
+                    await WaitForRateLimitSlot(_shutdownTokenSource.Token);
 
                     // Check again if cancelled during wait
                     if (workItem.IsAlreadyCancelled)
@@ -127,6 +119,10 @@ namespace RatelimitWorkflow
                     // Execute the work item (non-blocking)
                     _ = ExecuteWorkItem(workItem);
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected during shutdown
             }
             catch (Exception ex)
             {
@@ -175,6 +171,7 @@ namespace RatelimitWorkflow
 
         private async Task ExecuteWorkItem(WorkItem workItem)
         {
+            OnWorkItemStarted();
             try
             {
                 await workItem.ExecuteAsync();
@@ -183,6 +180,10 @@ namespace RatelimitWorkflow
             {
                 // Log in production
                 System.Diagnostics.Debug.WriteLine($"Work item execution error: {ex}");
+            }
+            finally
+            {
+                OnWorkItemCompleted();
             }
         }
 
@@ -197,7 +198,10 @@ namespace RatelimitWorkflow
                 _isDisposing = true;
             }
 
-            // Wait for dispatcher to finish processing all items
+            // Signal shutdown so dispatcher stops accepting new work
+            _shutdownTokenSource.Cancel();
+
+            // Wait for dispatcher to finish processing current items
             try
             {
                 await _dispatcherTask;
@@ -213,8 +217,16 @@ namespace RatelimitWorkflow
                 workItem.Cancel();
             }
 
-            // Signal shutdown after dispatcher is done
-            _shutdownTokenSource.Cancel();
+            // Wait for any in-flight executing tasks to complete (with timeout to avoid indefinite hang)
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            try
+            {
+                await _inFlightTcs.Task.WaitAsync(timeoutCts.Token);
+            }
+            catch
+            {
+                // Swallow any timeout - proceed with disposal
+            }
 
             // Cleanup resources
             _shutdownTokenSource.Dispose();
@@ -304,7 +316,10 @@ namespace RatelimitWorkflow
                 }
                 catch (OperationCanceledException) when (_userCancellationToken.IsCancellationRequested || _shutdownToken.IsCancellationRequested)
                 {
-                    TaskCompletionSource.TrySetCanceled();
+                    var tokenToUse = _userCancellationToken.IsCancellationRequested 
+                        ? _userCancellationToken 
+                        : _shutdownToken;
+                    TaskCompletionSource.TrySetCanceled(tokenToUse);
                 }
                 catch (Exception ex)
                 {

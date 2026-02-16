@@ -1,0 +1,103 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{3BFDE37B-6E6A-56AA-222A-8BEDEA9F6C08}|RatelimitWorkflow.csproj|d:\\github\\repos\\backgroundtasks\\ratelimitworkflow\\ratelimitedworkqueue.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3BFDE37B-6E6A-56AA-222A-8BEDEA9F6C08}|RatelimitWorkflow.csproj|solutionrelative:ratelimitedworkqueue.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3BFDE37B-6E6A-56AA-222A-8BEDEA9F6C08}|RatelimitWorkflow.csproj|d:\\github\\repos\\backgroundtasks\\ratelimitworkflow\\ratelimitconfiguration.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3BFDE37B-6E6A-56AA-222A-8BEDEA9F6C08}|RatelimitWorkflow.csproj|solutionrelative:ratelimitconfiguration.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{116B47EC-5AFB-3D41-6B21-47B4DE0A7A01}|..\\RatelimitWorkflow.Tests\\RatelimitWorkflow.Tests.csproj|d:\\github\\repos\\backgroundtasks\\ratelimitworkflow.tests\\ratelimitedworkqueuetests.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3BFDE37B-6E6A-56AA-222A-8BEDEA9F6C08}|RatelimitWorkflow.csproj|d:\\github\\repos\\backgroundtasks\\ratelimitworkflow\\ratelimitworkflow.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}|",
+      "RelativeMoniker": "D:0:0:{3BFDE37B-6E6A-56AA-222A-8BEDEA9F6C08}|RatelimitWorkflow.csproj|solutionrelative:ratelimitworkflow.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}|"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{3BFDE37B-6E6A-56AA-222A-8BEDEA9F6C08}|RatelimitWorkflow.csproj|d:\\github\\repos\\backgroundtasks\\ratelimitworkflow\\iworkqueue.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{3BFDE37B-6E6A-56AA-222A-8BEDEA9F6C08}|RatelimitWorkflow.csproj|solutionrelative:iworkqueue.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 2,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "RatelimitWorkflow.csproj",
+              "DocumentMoniker": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow\\RatelimitWorkflow.csproj",
+              "RelativeDocumentMoniker": "RatelimitWorkflow.csproj",
+              "ToolTip": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow\\RatelimitWorkflow.csproj",
+              "RelativeToolTip": "RatelimitWorkflow.csproj",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000758|",
+              "WhenOpened": "2026-02-15T11:05:58.039Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "RateLimitedWorkQueueTests.cs",
+              "DocumentMoniker": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow.Tests\\RateLimitedWorkQueueTests.cs",
+              "RelativeDocumentMoniker": "..\\RatelimitWorkflow.Tests\\RateLimitedWorkQueueTests.cs",
+              "ToolTip": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow.Tests\\RateLimitedWorkQueueTests.cs",
+              "RelativeToolTip": "..\\RatelimitWorkflow.Tests\\RateLimitedWorkQueueTests.cs",
+              "ViewState": "AgIAAJQBAAAAAAAAAAAnwKQBAAAsAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-15T10:55:32.144Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "RateLimitedWorkQueue.cs",
+              "DocumentMoniker": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow\\RateLimitedWorkQueue.cs",
+              "RelativeDocumentMoniker": "RateLimitedWorkQueue.cs",
+              "ToolTip": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow\\RateLimitedWorkQueue.cs",
+              "RelativeToolTip": "RateLimitedWorkQueue.cs",
+              "ViewState": "AgIAANYAAAAAAAAAAAAiwCsAAAAbAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-15T10:53:51.719Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "RateLimitConfiguration.cs",
+              "DocumentMoniker": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow\\RateLimitConfiguration.cs",
+              "RelativeDocumentMoniker": "RateLimitConfiguration.cs",
+              "ToolTip": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow\\RateLimitConfiguration.cs",
+              "RelativeToolTip": "RateLimitConfiguration.cs",
+              "ViewState": "AgIAAA4AAAAAAAAAAAAcwA8AAAAWAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-15T10:53:24.826Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "IWorkQueue.cs",
+              "DocumentMoniker": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow\\IWorkQueue.cs",
+              "RelativeDocumentMoniker": "IWorkQueue.cs",
+              "ToolTip": "D:\\Github\\Repos\\backgroundtasks\\RatelimitWorkflow\\IWorkQueue.cs",
+              "RelativeToolTip": "IWorkQueue.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABMAAAAaAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-15T10:52:37.374Z"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

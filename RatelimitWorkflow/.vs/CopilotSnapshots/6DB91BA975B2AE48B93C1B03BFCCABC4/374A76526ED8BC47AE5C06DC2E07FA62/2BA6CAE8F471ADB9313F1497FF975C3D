@@ -1,0 +1,289 @@
+﻿using System;
+using System.Collections.Concurrent;
+
+namespace RatelimitWorkflow
+{
+    /// <summary>
+    /// A thread-safe work queue that enforces rate limiting and supports graceful shutdown.
+    /// </summary>
+    public sealed class RateLimitedWorkQueue : IWorkQueue
+    {
+        private readonly RateLimitConfiguration _configuration;
+        private readonly ConcurrentQueue<WorkItem> _queue = new();
+        private readonly SemaphoreSlim _workAvailableSignal = new(0);
+        private readonly CancellationTokenSource _shutdownTokenSource = new();
+        private readonly Task _dispatcherTask;
+        private readonly object _disposeLock = new();
+
+        // Rate limiting state
+        private readonly Queue<DateTime> _executionTimestamps = new();
+        private readonly object _rateLimitLock = new();
+
+        private volatile bool _isDisposed;
+        private volatile bool _isDisposing;
+
+        /// <summary>
+        /// Creates a new rate-limited work queue.
+        /// </summary>
+        /// <param name="configuration">Rate limiting configuration.</param>
+        public RateLimitedWorkQueue(RateLimitConfiguration configuration)
+        {
+            _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+            _dispatcherTask = Task.Run(DispatcherLoop);
+        }
+
+        /// <inheritdoc/>
+        public Task<TResult> EnqueueAsync<TResult>(
+            Func<CancellationToken, Task<TResult>> operation,
+            CancellationToken cancellationToken = default)
+        {
+            if (operation == null)
+                throw new ArgumentNullException(nameof(operation));
+
+            // Check disposal state
+            if (_isDisposed || _isDisposing)
+                throw new ObjectDisposedException(nameof(RateLimitedWorkQueue));
+
+            var workItem = new WorkItem<TResult>(operation, cancellationToken, _shutdownTokenSource.Token);
+
+            // Register cancellation callback to remove from queue if cancelled before execution
+            if (cancellationToken.CanBeCanceled)
+            {
+                workItem.CancellationRegistration = cancellationToken.Register(() =>
+                {
+                    if (workItem.TryCancel())
+                    {
+                        // Task was cancelled before execution started
+                    }
+                });
+            }
+
+            _queue.Enqueue(workItem);
+            _workAvailableSignal.Release();
+
+            return workItem.TaskCompletionSource.Task;
+        }
+
+        private async Task DispatcherLoop()
+        {
+            try
+            {
+                while (!_shutdownTokenSource.Token.IsCancellationRequested)
+                {
+                    // Wait for work to be available
+                    await _workAvailableSignal.WaitAsync(_shutdownTokenSource.Token);
+
+                    // Try to dequeue work
+                    if (!_queue.TryDequeue(out var workItem))
+                        continue;
+
+                    // Check if item was already cancelled
+                    if (workItem.IsAlreadyCancelled)
+                        continue;
+
+                    // Enforce rate limit
+                    await WaitForRateLimitSlot(_shutdownTokenSource.Token);
+
+                    // Check again if cancelled during wait
+                    if (workItem.IsAlreadyCancelled)
+                        continue;
+
+                    // Execute the work item (non-blocking)
+                    _ = ExecuteWorkItem(workItem);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected during shutdown
+            }
+            catch (Exception ex)
+            {
+                // Unexpected exception in dispatcher - log in production
+                System.Diagnostics.Debug.WriteLine($"Dispatcher error: {ex}");
+            }
+        }
+
+        private async Task WaitForRateLimitSlot(CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                DateTime now = DateTime.UtcNow;
+                TimeSpan? waitTime = null;
+
+                lock (_rateLimitLock)
+                {
+                    // Remove expired timestamps
+                    DateTime cutoff = now - _configuration.Period;
+                    while (_executionTimestamps.Count > 0 && _executionTimestamps.Peek() <= cutoff)
+                    {
+                        _executionTimestamps.Dequeue();
+                    }
+
+                    // Check if we can execute now
+                    if (_executionTimestamps.Count < _configuration.MaxTasksPerPeriod)
+                    {
+                        _executionTimestamps.Enqueue(now);
+                        return;
+                    }
+
+                    // Calculate wait time until oldest timestamp expires
+                    DateTime oldestTimestamp = _executionTimestamps.Peek();
+                    waitTime = (oldestTimestamp + _configuration.Period) - now;
+                }
+
+                // Wait outside the lock
+                if (waitTime.HasValue && waitTime.Value > TimeSpan.Zero)
+                {
+                    await Task.Delay(waitTime.Value, cancellationToken);
+                }
+            }
+        }
+
+        private async Task ExecuteWorkItem(WorkItem workItem)
+        {
+            try
+            {
+                await workItem.ExecuteAsync();
+            }
+            catch (Exception ex)
+            {
+                // Log in production
+                System.Diagnostics.Debug.WriteLine($"Work item execution error: {ex}");
+            }
+        }
+
+        /// <inheritdoc/>
+        public async ValueTask DisposeAsync()
+        {
+            lock (_disposeLock)
+            {
+                if (_isDisposed || _isDisposing)
+                    return;
+
+                _isDisposing = true;
+            }
+
+            // Wait for dispatcher to finish processing all items
+            try
+            {
+                await _dispatcherTask;
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected
+            }
+
+            // Cancel all remaining pending items in the queue
+            while (_queue.TryDequeue(out var workItem))
+            {
+                workItem.Cancel();
+            }
+
+            // Signal shutdown after dispatcher is done
+            _shutdownTokenSource.Cancel();
+
+            // Cleanup resources
+            _shutdownTokenSource.Dispose();
+            _workAvailableSignal.Dispose();
+
+            _isDisposed = true;
+        }
+
+        /// <summary>
+        /// Base class for work items in the queue.
+        /// </summary>
+        private abstract class WorkItem
+        {
+            private int _state; // 0 = Pending, 1 = Executing, 2 = Cancelled
+
+            protected const int StatePending = 0;
+            protected const int StateExecuting = 1;
+            protected const int StateCancelled = 2;
+
+            public CancellationTokenRegistration CancellationRegistration { get; set; }
+
+            public bool IsAlreadyCancelled => Volatile.Read(ref _state) == StateCancelled;
+
+            public bool TryCancel()
+            {
+                if (Interlocked.CompareExchange(ref _state, StateCancelled, StatePending) == StatePending)
+                {
+                    CancellationRegistration.Dispose();
+                    OnCancelled();
+                    return true;
+                }
+                return false;
+            }
+
+            public void Cancel()
+            {
+                TryCancel();
+            }
+
+            protected bool TryStartExecution()
+            {
+                return Interlocked.CompareExchange(ref _state, StateExecuting, StatePending) == StatePending;
+            }
+
+            public abstract Task ExecuteAsync();
+            protected abstract void OnCancelled();
+        }
+
+        /// <summary>
+        /// Typed work item that holds the operation and manages its lifecycle.
+        /// </summary>
+        private sealed class WorkItem<TResult> : WorkItem
+        {
+            private readonly Func<CancellationToken, Task<TResult>> _operation;
+            private readonly CancellationToken _userCancellationToken;
+            private readonly CancellationToken _shutdownToken;
+
+            public TaskCompletionSource<TResult> TaskCompletionSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            public WorkItem(
+                Func<CancellationToken, Task<TResult>> operation,
+                CancellationToken userCancellationToken,
+                CancellationToken shutdownToken)
+            {
+                _operation = operation;
+                _userCancellationToken = userCancellationToken;
+                _shutdownToken = shutdownToken;
+            }
+
+            public override async Task ExecuteAsync()
+            {
+                if (!TryStartExecution())
+                {
+                    // Already cancelled
+                    return;
+                }
+
+                CancellationRegistration.Dispose();
+
+                try
+                {
+                    // Create linked token that respects both user cancellation and shutdown
+                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_userCancellationToken, _shutdownToken);
+
+                    var result = await _operation(linkedCts.Token);
+                    TaskCompletionSource.TrySetResult(result);
+                }
+                catch (OperationCanceledException) when (_userCancellationToken.IsCancellationRequested || _shutdownToken.IsCancellationRequested)
+                {
+                    TaskCompletionSource.TrySetCanceled();
+                }
+                catch (Exception ex)
+                {
+                    TaskCompletionSource.TrySetException(ex);
+                }
+            }
+
+            protected override void OnCancelled()
+            {
+                TaskCompletionSource.TrySetCanceled(_userCancellationToken);
+            }
+        }
+    }
+}

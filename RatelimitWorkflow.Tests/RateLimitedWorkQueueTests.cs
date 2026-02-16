@@ -1,0 +1,508 @@
+using RatelimitWorkflow;
+using System.Collections.Concurrent;
+using Xunit;
+
+namespace RatelimitWorkflow.Tests
+{
+    public class RateLimitedWorkQueueTests
+    {
+        #region Basic Functionality Tests
+
+        [Fact]
+        public async Task EnqueueAsync_ExecutesOperationAndReturnsResult()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+
+            // Act
+            var result = await queue.EnqueueAsync(async ct =>
+            {
+                await Task.Delay(10, ct);
+                return 42;
+            });
+
+            // Assert
+            Assert.Equal(42, result);
+        }
+
+        [Fact]
+        public async Task EnqueueAsync_ExecutesMultipleOperations()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+            var results = new List<int>();
+
+            // Act
+            var tasks = Enumerable.Range(1, 5).Select(i =>
+                queue.EnqueueAsync(async ct =>
+                {
+                    await Task.Delay(10, ct);
+                    return i;
+                })
+            ).ToList();
+
+            results.AddRange(await Task.WhenAll(tasks));
+
+            // Assert
+            Assert.Equal(5, results.Count);
+            Assert.Equal(new[] { 1, 2, 3, 4, 5 }, results.OrderBy(x => x));
+        }
+
+        #endregion
+
+        #region Rate Limiting Tests
+
+        [Fact]
+        public async Task RateLimit_EnforcesMaxTasksPerPeriod()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(maxTasksPerPeriod: 5, period: TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+            var executionTimes = new ConcurrentBag<DateTime>();
+            var startTime = DateTime.UtcNow;
+
+            // Act - Enqueue 10 tasks (should take at least 2 periods)
+            var tasks = Enumerable.Range(0, 10).Select(_ =>
+                queue.EnqueueAsync(async ct =>
+                {
+                    executionTimes.Add(DateTime.UtcNow);
+                    await Task.Delay(1, ct);
+                    return true;
+                })
+            ).ToList();
+
+            await Task.WhenAll(tasks);
+            var endTime = DateTime.UtcNow;
+            var totalDuration = endTime - startTime;
+
+            // Assert
+            Assert.Equal(10, executionTimes.Count);
+
+            // Should take at least 1 second (2 periods - 1) but with some tolerance
+            Assert.True(totalDuration.TotalMilliseconds >= 900,
+                $"Expected at least 900ms, but took {totalDuration.TotalMilliseconds}ms");
+
+            // Verify no more than 5 tasks executed in any 1-second window
+            var orderedTimes = executionTimes.OrderBy(t => t).ToList();
+            for (int i = 0; i < orderedTimes.Count - 5; i++)
+            {
+                var windowDuration = orderedTimes[i + 5] - orderedTimes[i];
+                Assert.True(windowDuration.TotalSeconds >= 1.0 - 0.1, // 100ms tolerance
+                    $"More than 5 tasks executed within 1 second window at index {i}");
+            }
+        }
+
+        [Fact]
+        public async Task RateLimit_RespectsConfiguredPeriod()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(maxTasksPerPeriod: 3, period: TimeSpan.FromMilliseconds(500));
+            await using var queue = new RateLimitedWorkQueue(config);
+            var startTime = DateTime.UtcNow;
+
+            // Act - Enqueue 6 tasks (should take at least 1 second for 2 periods)
+            var tasks = Enumerable.Range(0, 6).Select(_ =>
+                queue.EnqueueAsync(ct => Task.FromResult(true))
+            ).ToList();
+
+            await Task.WhenAll(tasks);
+            var duration = DateTime.UtcNow - startTime;
+
+            // Assert - Should take at least 500ms (2 periods - 1)
+            Assert.True(duration.TotalMilliseconds >= 450,
+                $"Expected at least 450ms, but took {duration.TotalMilliseconds}ms");
+        }
+
+        #endregion
+
+        #region Cancellation Tests
+
+        [Fact]
+        public async Task Cancellation_CancelsTaskBeforeExecution()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(1, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+            var cts = new CancellationTokenSource();
+            var operationExecuted = false;
+
+            // Act - Fill the queue so the second task waits
+            var blockingTask = queue.EnqueueAsync(async ct =>
+            {
+                await Task.Delay(200, ct);
+                return 1;
+            });
+
+            var cancelledTask = queue.EnqueueAsync(async ct =>
+            {
+                operationExecuted = true;
+                await Task.Delay(10, ct);
+                return 2;
+            }, cts.Token);
+
+            // Cancel before the task can execute
+            cts.Cancel();
+
+            await blockingTask;
+
+            // Assert
+            await Assert.ThrowsAsync<TaskCanceledException>(async () => await cancelledTask);
+            Assert.False(operationExecuted, "Operation should not have been executed");
+        }
+
+        [Fact]
+        public async Task Cancellation_PassesTokenToRunningTask()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+            var operationStarted = new TaskCompletionSource<bool>();
+            var cancellationDetected = false;
+
+            // Act
+            var task = queue.EnqueueAsync(async ct =>
+            {
+                operationStarted.SetResult(true);
+                try
+                {
+                    await Task.Delay(5000, ct);
+                    return false;
+                }
+                catch (OperationCanceledException)
+                {
+                    cancellationDetected = true;
+                    throw;
+                }
+            });
+
+            await operationStarted.Task;
+
+            // Dispose triggers shutdown which should cancel running tasks
+            await queue.DisposeAsync();
+
+            // Assert
+            await Assert.ThrowsAsync<TaskCanceledException>(async () => await task);
+            Assert.True(cancellationDetected, "Cancellation should have been detected in the operation");
+        }
+
+        [Fact]
+        public async Task Cancellation_MultipleCancelledTasksHandledCorrectly()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(1, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+            var cts1 = new CancellationTokenSource();
+            var cts2 = new CancellationTokenSource();
+            var cts3 = new CancellationTokenSource();
+
+            // Act
+            var blockingTask = queue.EnqueueAsync(async ct =>
+            {
+                await Task.Delay(300, ct);
+                return 1;
+            });
+
+            var task1 = queue.EnqueueAsync(ct => Task.FromResult(2), cts1.Token);
+            var task2 = queue.EnqueueAsync(ct => Task.FromResult(3), cts2.Token);
+            var task3 = queue.EnqueueAsync(ct => Task.FromResult(4), cts3.Token);
+
+            cts1.Cancel();
+            cts2.Cancel();
+            cts3.Cancel();
+
+            await blockingTask;
+
+            // Assert
+            await Assert.ThrowsAsync<TaskCanceledException>(async () => await task1);
+            await Assert.ThrowsAsync<TaskCanceledException>(async () => await task2);
+            await Assert.ThrowsAsync<TaskCanceledException>(async () => await task3);
+        }
+
+        #endregion
+
+        #region Disposal Tests
+
+        [Fact]
+        public async Task Dispose_RejectsNewTasksAfterDisposal()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            var queue = new RateLimitedWorkQueue(config);
+
+            // Act
+            await queue.DisposeAsync();
+
+            // Assert
+            await Assert.ThrowsAsync<ObjectDisposedException>(async () =>
+                await queue.EnqueueAsync(ct => Task.FromResult(42)));
+        }
+
+        [Fact]
+        public async Task Dispose_WaitsForInFlightTasks()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            var queue = new RateLimitedWorkQueue(config);
+            var taskStarted = new TaskCompletionSource<bool>();
+            var taskCompleted = false;
+
+            // Act
+            var task = queue.EnqueueAsync(async ct =>
+            {
+                taskStarted.SetResult(true);
+                await Task.Delay(200);
+                taskCompleted = true;
+                return 42;
+            });
+
+            await taskStarted.Task;
+            await queue.DisposeAsync();
+
+            // Assert
+            Assert.True(taskCompleted, "In-flight task should have completed before disposal finished");
+        }
+
+        [Fact]
+        public async Task Dispose_CancelsQueuedTasks()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(1, TimeSpan.FromSeconds(1));
+            var queue = new RateLimitedWorkQueue(config);
+            var queuedExecuted = false;
+
+            // Act - Fill capacity and queue additional tasks
+            var blockingTask = queue.EnqueueAsync(async ct =>
+            {
+                await Task.Delay(200, ct);
+                return 1;
+            });
+
+            var queuedTasks = Enumerable.Range(0, 5).Select(_ =>
+                queue.EnqueueAsync(async ct =>
+                {
+                    queuedExecuted = true;
+                    await Task.Delay(10, ct);
+                    return 2;
+                })
+            ).ToList();
+
+            await queue.DisposeAsync();
+
+            // Assert
+            await blockingTask; // This should complete
+
+            foreach (var queuedTask in queuedTasks)
+            {
+                await Assert.ThrowsAsync<TaskCanceledException>(async () => await queuedTask);
+            }
+
+            Assert.False(queuedExecuted, "Queued tasks should not have executed");
+        }
+
+        [Fact]
+        public async Task Dispose_IsIdempotent()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            var queue = new RateLimitedWorkQueue(config);
+
+            // Act & Assert - Multiple disposals should not throw
+            await queue.DisposeAsync();
+            await queue.DisposeAsync();
+            await queue.DisposeAsync();
+        }
+
+        #endregion
+
+        #region Exception Handling Tests
+
+        [Fact]
+        public async Task ExceptionHandling_PropagatesOperationException()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+            var expectedException = new InvalidOperationException("Test exception");
+
+            // Act
+            var task = queue.EnqueueAsync<int>(ct => throw expectedException);
+
+            // Assert
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () => await task);
+            Assert.Equal("Test exception", exception.Message);
+        }
+
+        [Fact]
+        public async Task ExceptionHandling_PropagatesAsyncOperationException()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+
+            // Act
+            var task = queue.EnqueueAsync<int>(async ct =>
+            {
+                await Task.Delay(10, ct);
+                throw new InvalidOperationException("Async test exception");
+            });
+
+            // Assert
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () => await task);
+            Assert.Equal("Async test exception", exception.Message);
+        }
+
+        [Fact]
+        public async Task ExceptionHandling_DoesNotAffectOtherTasks()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+
+            // Act
+            var failingTask = queue.EnqueueAsync<int>(ct => throw new InvalidOperationException("Fail"));
+            var successTask = queue.EnqueueAsync(async ct =>
+            {
+                await Task.Delay(10, ct);
+                return 42;
+            });
+
+            // Assert
+            await Assert.ThrowsAsync<InvalidOperationException>(async () => await failingTask);
+            var result = await successTask;
+            Assert.Equal(42, result);
+        }
+
+        #endregion
+
+        #region Concurrency Tests
+
+        [Fact]
+        public async Task Concurrency_HandlesHighConcurrentLoad()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(20, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+            var taskCount = 100;
+            var completedCount = 0;
+
+            // Act
+            var tasks = Enumerable.Range(0, taskCount).Select(i =>
+                queue.EnqueueAsync(async ct =>
+                {
+                    await Task.Delay(10, ct);
+                    Interlocked.Increment(ref completedCount);
+                    return i;
+                })
+            ).ToList();
+
+            var results = await Task.WhenAll(tasks);
+
+            // Assert
+            Assert.Equal(taskCount, results.Length);
+            Assert.Equal(taskCount, completedCount);
+            Assert.Equal(taskCount, results.Distinct().Count()); // All unique
+        }
+
+        [Fact]
+        public async Task Concurrency_ThreadSafeEnqueuing()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(50, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+            var taskCount = 100;
+
+            // Act - Enqueue from multiple threads simultaneously
+            var enqueueTasks = Enumerable.Range(0, taskCount).Select(i =>
+                Task.Run(() => queue.EnqueueAsync(ct => Task.FromResult(i)))
+            ).ToList();
+
+            var results = await Task.WhenAll(enqueueTasks);
+
+            // Assert
+            Assert.Equal(taskCount, results.Length);
+            Assert.Equal(taskCount, results.Distinct().Count());
+        }
+
+        #endregion
+
+        #region Configuration Tests
+
+        [Fact]
+        public void Configuration_RejectsInvalidMaxTasks()
+        {
+            // Act & Assert
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new RateLimitConfiguration(0, TimeSpan.FromSeconds(1)));
+
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new RateLimitConfiguration(-1, TimeSpan.FromSeconds(1)));
+        }
+
+        [Fact]
+        public void Configuration_RejectsInvalidPeriod()
+        {
+            // Act & Assert
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new RateLimitConfiguration(10, TimeSpan.Zero));
+
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new RateLimitConfiguration(10, TimeSpan.FromSeconds(-1)));
+        }
+
+        #endregion
+
+        #region Edge Case Tests
+
+        [Fact]
+        public async Task EdgeCase_SingleTaskCapacity()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(1, TimeSpan.FromMilliseconds(100));
+            await using var queue = new RateLimitedWorkQueue(config);
+
+            // Act - Enqueue multiple tasks with single capacity
+            var tasks = Enumerable.Range(0, 5).Select(i =>
+                queue.EnqueueAsync(ct => Task.FromResult(i))
+            ).ToList();
+
+            var results = await Task.WhenAll(tasks);
+
+            // Assert
+            Assert.Equal(new[] { 0, 1, 2, 3, 4 }, results);
+        }
+
+        [Fact]
+        public async Task EdgeCase_VeryShortPeriod()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromMilliseconds(10));
+            await using var queue = new RateLimitedWorkQueue(config);
+
+            // Act
+            var tasks = Enumerable.Range(0, 20).Select(i =>
+                queue.EnqueueAsync(ct => Task.FromResult(i))
+            ).ToList();
+
+            var results = await Task.WhenAll(tasks);
+
+            // Assert
+            Assert.Equal(20, results.Length);
+        }
+
+        [Fact]
+        public async Task EdgeCase_NullOperationThrows()
+        {
+            // Arrange
+            var config = new RateLimitConfiguration(10, TimeSpan.FromSeconds(1));
+            await using var queue = new RateLimitedWorkQueue(config);
+
+            // Act & Assert
+            await Assert.ThrowsAsync<ArgumentNullException>(async () =>
+                await queue.EnqueueAsync<int>(null!));
+        }
+
+        #endregion
+    }
+}

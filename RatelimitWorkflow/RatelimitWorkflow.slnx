@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="../RatelimitWorkflow.Tests/RatelimitWorkflow.Tests.csproj" />
+  <Project Path="RatelimitWorkflow.csproj" />
+</Solution>

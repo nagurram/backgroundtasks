@@ -44,10 +44,22 @@ on:
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      solution:
+        description: 'Solution or project path to build (relative to repo root)'
+        required: false
+        default: 'RatelimitWorkflow.slnx'
+      configuration:
+        description: 'Build configuration'
+        required: false
+        default: 'Debug'
 
 jobs:
   build-and-test:
     runs-on: ${{ matrix.os }}
+    env:
+      SOLUTION: ${{ github.event.inputs.solution || 'RatelimitWorkflow.slnx' }}
+      CONFIGURATION: ${{ github.event.inputs.configuration || 'Debug' }}
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -63,10 +75,10 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore
+        run: dotnet restore ${{ env.SOLUTION }}
 
       - name: Build
-        run: dotnet build --no-restore --configuration ${{ matrix.configuration }}
+        run: dotnet build ${{ env.SOLUTION }} --no-restore --configuration ${{ env.CONFIGURATION }}
 
       - name: Test
-        run: dotnet test RatelimitWorkflow.Tests/RatelimitWorkflow.Tests.csproj --no-build --configuration ${{ matrix.configuration }} --verbosity normal
+        run: dotnet test RatelimitWorkflow.Tests/RatelimitWorkflow.Tests.csproj --no-build --configuration ${{ env.CONFIGURATION }} --verbosity normal
